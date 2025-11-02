@@ -1,563 +1,458 @@
-# app.py
+# technibot_app.py
 """
-Technibot - All-in-one Streamlit app
+Technibot — Advanced single-file Streamlit app
 Features:
-- Chatbot for tech help (finalQuery enforced)
-- Image & video generation interfaces (Hugging Face / Pexels)
-- Embedded mini-games (Snake, simple platformer)
-- Futuristic UI with light/dark toggle
-- Local caching + downloadable manifest/service-worker/tech_knowledge.json
-- Single-file deployment for Streamlit (GitHub -> Streamlit sharing)
+ - Chat: choose AI provider (OpenAI / HuggingFace / Knowledge Base fallback)
+ - Image Gen: HuggingFace Stable Diffusion wrapper + fallback
+ - Video Gen: wrappers for DeepAI/Runway placeholders (requires keys)
+ - Voice (TTS): multiple provider toggles (Google TTS placeholder, TTS-MP3, espeak)
+ - Games: 15 HTML/JS browser games embedded via iframes/components (Kongregate, ArmorGames, Miniclip, AddictingGames, Newgrounds)
+ - UI: Light/Dark toggle, gradient theme options
+ - finalQuery toggle & button for Chat
+ - Secrets support (st.secrets or .env)
 """
 
 import os
 import json
 import time
-import base64
 import tempfile
+import base64
 import textwrap
-from typing import List, Dict, Any, Optional
+from typing import Optional, Dict, Any, List
 
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 
-# ---------------------------
-# CONFIG & HELPERS
-# ---------------------------
+# -------------------------
+# Page config & defaults
+# -------------------------
+st.set_page_config(page_title="Technibot", layout="wide", initial_sidebar_state="expanded", page_icon="🤖")
 
-st.set_page_config(
-    page_title="Technibot — Advanced Tech Assistant",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# Environment keys (optional)
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
-
-# Tech knowledge JSON (embedded)
-TECH_KNOWLEDGE = {
-    "categories": [
-        {"id": "os", "title": "Operating Systems", "items": ["Windows", "Linux", "macOS"]},
-        {"id": "web", "title": "Web Dev", "items": ["HTML", "CSS", "JavaScript", "Streamlit"]},
-        {"id": "ai", "title": "AI & ML", "items": ["HuggingFace", "OpenAI", "Stable Diffusion"]},
-    ],
-    "meta": {"project": "Technibot", "version": "1.0", "author": "Technibot Generator"}
-}
-
-# Downloadable assets (manifest & service worker)
-MANIFEST_JSON = {
-    "name": "Technibot",
-    "short_name": "Technibot",
-    "start_url": "/",
-    "display": "standalone",
-    "icons": [{"src": "icon.png", "sizes": "512x512", "type": "image/png"}],
-    "theme_color": "#0ff",
-    "background_color": "#000"
-}
-
-SERVICE_WORKER_JS = """
-// Minimalistic service worker stub for caching static assets - Streamlit can't register this client-side normally,
-// but it's included for progressive web app export and for your static hosting if you extract files.
-self.addEventListener('install', function(event) {
-  event.waitUntil(caches.open('technibot-v1').then(function(cache) {
-    return cache.addAll(['/','/index.html']);
-  }));
-});
-self.addEventListener('fetch', function(event) {
-  event.respondWith(caches.match(event.request).then(function(resp) {
-    return resp || fetch(event.request);
-  }));
-});
-"""
-
-# Utility: download button wrapper for JSON
-def download_json_button(data, filename="data.json", label="Download"):
-    b64 = base64.b64encode(json.dumps(data, indent=2).encode()).decode()
-    href = f"data:application/json;base64,{b64}"
-    st.markdown(f"[{label}]({href})", unsafe_allow_html=True)
-
-# Caching decorator for generated content
-@st.cache_data(show_spinner=False)
-def cached_api_post(url: str, headers: Dict[str, str], payload: Any = None, json_body: Any = None, timeout: int = 30):
+# -------------------------
+# Load API keys from streamlit secrets (preferred) or env (local dev)
+# -------------------------
+def get_secret(key: str) -> Optional[str]:
     try:
-        r = requests.post(url, headers=headers, data=payload, json=json_body, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        return {"error": str(e), "status_code": getattr(e, "response", None)}
+        return st.secrets.get(key)  # Streamlit secrets (preferred)
+    except Exception:
+        return os.getenv(key)
 
-# ---------------------------
-# UI THEME (light/dark)
-# ---------------------------
+OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
+HUGGINGFACE_API_KEY = get_secret("HUGGINGFACE_API_KEY")
+PEXELS_API_KEY = get_secret("PEXELS_API_KEY")
+DEEPAI_API_KEY = get_secret("DEEPAI_API_KEY")
+RUNWAY_API_KEY = get_secret("RUNWAY_API_KEY")
+TTSMP3_API_KEY = get_secret("TTSMP3_API_KEY")
 
+# -------------------------
+# App session defaults
+# -------------------------
 if "theme" not in st.session_state:
-    st.session_state.theme = "dark"
+    st.session_state.theme = "dark"   # 'dark' or 'light'
 
-def toggle_theme():
-    st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
+if "messages" not in st.session_state:
+    st.session_state.messages = []  # chat history: list of dicts {"role":"user"/"assistant", "text":...}
 
-# CSS theme + neon accent
-def local_css():
+if "finalQuery_enabled" not in st.session_state:
+    st.session_state.finalQuery_enabled = True
+
+# -------------------------
+# Styling (light/dark, neon)
+# -------------------------
+def apply_css():
     theme = st.session_state.theme
-    # simple neon gradient backgrounds and styles
+    bg = "#071018" if theme == "dark" else "#f8fafc"
+    panel = "#0b1620" if theme == "dark" else "#ffffff"
+    text = "#e6f6f0" if theme == "dark" else "#091226"
+    muted = "#8da0b3" if theme == "dark" else "#6b7280"
     css = f"""
     <style>
-    :root {{
-      --bg-color: {'#0b0f14' if theme=='dark' else '#f8fafc'};
-      --panel-color: {'#071018' if theme=='dark' else '#ffffff'};
-      --muted: {'#8da0b3' if theme=='dark' else '#6b7280'};
-      --accent: linear-gradient(90deg,#00ffd5,#7a00ff);
-      --neon: rgba(0,255,213,0.08);
-      --glass: rgba(255,255,255,0.02);
-    }}
-    .stApp {{
-      background: radial-gradient(ellipse at 10% 10%, rgba(122,0,255,0.06), transparent 10%),
-                  radial-gradient(ellipse at 90% 90%, rgba(0,255,213,0.03), transparent 10%),
-                  var(--bg-color);
-      color: {'#dbeafe' if theme=='dark' else '#0f172a'};
-    }}
-    .card {{
-      background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.00));
-      border-radius: 14px;
-      padding: 16px;
-      box-shadow: 0 6px 18px rgba(2,6,23,0.6);
-      border: 1px solid rgba(255,255,255,0.03);
-    }}
-    .neon-title {{
-      font-family: 'Segoe UI', Roboto, sans-serif;
-      font-weight: 700;
-      font-size: 28px;
-      background: -webkit-linear-gradient(#fff, #8ef9e3);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      text-shadow: 0 0 18px rgba(0,255,213,0.12);
-    }}
-    .muted {{ color: var(--muted); font-size: 12px }}
-    .small-btn {{
-      background: linear-gradient(90deg,#00ffd5,#7a00ff);
-      border: none;
-      padding: 8px 12px;
-      color: #001;
-      font-weight: 600;
-      border-radius: 8px;
-      cursor: pointer;
-    }}
-    /* center HTML game canvas */
-    .game-container {{
-      display:flex; justify-content:center; align-items:center;
-    }}
+    .stApp {{ background: radial-gradient(circle at 10% 10%, rgba(122,0,255,0.06), transparent 8%), radial-gradient(circle at 90% 90%, rgba(0,255,213,0.03), transparent 8%), {bg}; color: {text}; }}
+    .card {{ background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent); padding: 16px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.03); }}
+    .neon-title {{ font-weight:700; font-size:28px; background: -webkit-linear-gradient(#fff, #8ef9e3); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-shadow: 0 0 18px rgba(0,255,213,0.08); }}
+    .muted {{ color: {muted}; font-size:13px; }}
+    .small-btn {{ background: linear-gradient(90deg,#00ffd5,#7a00ff); border-radius:8px; padding:8px 12px; color:#001; font-weight:700; }}
+    .game-grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr)); gap: 12px; }}
+    .game-card {{ padding:8px; border-radius:10px; background: rgba(255,255,255,0.01); border:1px solid rgba(255,255,255,0.02); }}
+    @media(max-width:600px){ .neon-title { font-size:20px; } }
     </style>
     """
     st.markdown(css, unsafe_allow_html=True)
 
-# Apply CSS
-local_css()
+apply_css()
 
-# ---------------------------
-# FINAL QUERY LOGIC (your required finalQuery)
-# ---------------------------
-
-def build_final_query(user_input: str, prompt: str) -> str:
-    # Use your exact wording
-    finalQuery = (
-        "As an Advanced Pro Paid AI CHATBOT THAT GIVES SUGGESTIONS FOR TECH-RELATED PROBLEMS, "
-        "GIVE SOLUTION TO " + user_input + ", "
-        "GIVE SOLUTION TO " + prompt + " TOOLS NEEDED TO HELP, VIDEOS TO WATCH, SITES TO VISIT, APPS NEEDED, STEPS TO TAKE, ETC."
-    )
-    return finalQuery
-
-# Execution engine: tries OpenAI -> HuggingFace -> local fallback
-def run_text_generation(prompt: str, max_tokens: int = 800) -> str:
-    # Priority: OpenAI if key is present, else Hugging Face Inference API, else local heuristic
-    if OPENAI_API_KEY:
-        try:
-            # Use OpenAI ChatCompletions (classic). The user may replace this with their own implementation.
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-            body = {
-                "model": "gpt-4o-mini" if False else "gpt-4o-mini",  # placeholder; user can edit
-                "messages": [{"role": "system", "content": "You are Technibot, an expert helpful assistant."},
-                             {"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": 0.15
-            }
-            r = requests.post(url, headers=headers, json=body, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            # adapt to response shapes
-            content = ""
-            if "choices" in data and len(data["choices"]) > 0:
-                content = data["choices"][0].get("message", {}).get("content", "")
-            return content or json.dumps(data)
-        except Exception as e:
-            return f"[OpenAI error] {str(e)}\n\nPrompt used:\n{prompt}"
-    elif HUGGINGFACE_API_KEY:
-        try:
-            # Using the Hugging Face text-generation inference endpoint
-            url = "https://api-inference.huggingface.co/models/gpt2"  # placeholder small model; you can choose better models
-            headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}", "Content-Type": "application/json"}
-            body = {"inputs": prompt, "parameters": {"max_new_tokens": 300, "temperature": 0.2}}
-            r = requests.post(url, headers=headers, json=body, timeout=40)
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                return data[0].get("generated_text", "")
-            return json.dumps(data)
-        except Exception as e:
-            return f"[HuggingFace error] {str(e)}\n\nPrompt used:\n{prompt}"
-    else:
-        # Local heuristic fallback (not a real LLM): produce structured guidance based on keywords
-        return heuristic_response(prompt)
+# -------------------------
+# Utility helpers
+# -------------------------
+def download_json(data: dict, filename: str = "data.json"):
+    b64 = base64.b64encode(json.dumps(data, indent=2).encode()).decode()
+    href = f"data:application/json;base64,{b64}"
+    st.markdown(f"[Download {filename}]({href})", unsafe_allow_html=True)
 
 def heuristic_response(prompt: str) -> str:
-    # A deterministic but helpful fallback - good for demos and offline use.
-    lines = []
-    lines.append("TECHNIBOT OFFLINE-HEURISTIC: (no external API key found). Here's structured guidance based on your request.")
-    if "install" in prompt.lower() or "setup" in prompt.lower():
-        lines.append("\n1) Summary: This looks like an installation/setup request.")
-        lines.append("2) Tools: installer, admin rights, internet, package manager (apt, brew, choco).")
-        lines.append("3) Steps:\n   - Step 1: Identify OS.\n   - Step 2: Update system packages.\n   - Step 3: Install required tools.\n   - Step 4: Configure and verify.")
-        lines.append("4) Videos: Search YouTube 'install <tool> on <os>'.")
-        lines.append("5) Apps & Sites: official docs, StackOverflow, GitHub issues.")
-    else:
-        lines.append("\n1) Analysis: I parsed a tech question but no LLM key present.")
-        lines.append("2) Quick tips: Break problem into (a) reproduce, (b) collect logs, (c) search exact error, (d) try minimal repro.")
-        lines.append("3) Tools: terminal, network analyzer (wireshark), logs, browser devtools.")
-        lines.append("4) Next steps: copy-paste error into StackOverflow and GitHub issues; try local troubleshooting steps.")
-    lines.append("\nIf you provide an API key for OpenAI or HuggingFace the assistant will produce a long, tailored plan (tools, videos, sites, apps, step-by-step instructions).")
-    return "\n".join(lines)
+    # Useful offline fallback
+    if "install" in prompt.lower():
+        return ("OFFLINE FALLBACK:\n1) Detect OS\n2) Update packages\n3) Install required packages\n4) Follow vendor docs\n\n(Use a real model by providing API keys to get full responses.)")
+    return ("OFFLINE FALLBACK:\nI couldn't find an API key. Try adding OPENAI_API_KEY or HUGGINGFACE_API_KEY to Streamlit secrets.\n\nQuick tips:\n- Reproduce the problem\n- Gather logs\n- Search error messages\n- Try minimal example")
 
-# ---------------------------
-# IMAGE & VIDEO GENERATION (simple wrappers)
-# ---------------------------
+# -------------------------
+# AI Wrappers
+# -------------------------
+def openai_chat(prompt: str, max_tokens: int = 600) -> str:
+    if not OPENAI_API_KEY:
+        return "[OpenAI API key not found] " + heuristic_response(prompt)
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    body = {
+        "model": "gpt-3.5-turbo",
+        "messages": [{"role": "system", "content": "You are Technibot, an expert technology assistant."},
+                     {"role": "user", "content": prompt}],
+        "temperature": 0.15,
+        "max_tokens": max_tokens,
+    }
+    r = requests.post(url, headers=headers, json=body, timeout=30)
+    if r.status_code != 200:
+        return f"[OpenAI error {r.status_code}] {r.text}"
+    try:
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        return str(r.text)
 
-@st.cache_data(show_spinner=False)
-def generate_image_with_hf(prompt: str, model: str = "stabilityai/stable-diffusion-2", size: str = "512x512"):
+def hf_text_generation(prompt: str, model: str = "google/flan-t5-large", max_new_tokens: int = 512) -> str:
+    # HuggingFace text-inference API
     if not HUGGINGFACE_API_KEY:
-        return {"error": "HUGGINGFACE_API_KEY not set. Please set it to enable image generation."}
+        return "[HuggingFace API key not found] " + heuristic_response(prompt)
     url = f"https://api-inference.huggingface.co/models/{model}"
     headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
-    payload = {"inputs": prompt}
+    body = {"inputs": prompt, "parameters": {"max_new_tokens": max_new_tokens, "temperature": 0.2}}
+    r = requests.post(url, headers=headers, json=body, timeout=40)
+    if r.status_code != 200:
+        return f"[HuggingFace error {r.status_code}] {r.text}"
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        content_type = resp.headers.get("content-type", "")
-        # The inference endpoint might return image bytes directly or JSON with artifacts
-        if "application/json" in content_type:
-            return resp.json()
-        else:
-            return {"image_bytes": resp.content}
-    except Exception as e:
-        return {"error": str(e)}
+        data = r.json()
+        # often returns list with generated_text
+        if isinstance(data, list) and "generated_text" in data[0]:
+            return data[0]["generated_text"]
+        if isinstance(data, dict) and "generated_text" in data:
+            return data["generated_text"]
+        return json.dumps(data)
+    except Exception:
+        return str(r.text)
 
-@st.cache_data(show_spinner=False)
-def search_videos_pexels(query: str, per_page: int = 5):
-    if not PEXELS_API_KEY:
-        return {"error": "PEXELS_API_KEY not set."}
-    url = "https://api.pexels.com/videos/search"
-    headers = {"Authorization": PEXELS_API_KEY}
-    params = {"query": query, "per_page": per_page}
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=20)
-        r.raise_for_status()
+def build_final_query(user_input: str, prompt_extra: str) -> str:
+    finalQuery = ("As an Advanced Pro Paid AI CHATBOT THAT GIVES SUGGESTIONS FOR TECH-RELATED PROBLEMS, "
+                  "GIVE SOLUTION TO " + user_input + ", "
+                  "GIVE SOLUTION TO " + prompt_extra + " TOOLS NEEDED TO HELP, VIDEOS TO WATCH, SITES TO VISIT, APPS NEEDED, STEPS TO TAKE, ETC.")
+    return finalQuery
+
+# Image generation: HF stable-diffusion (inference)
+def hf_image_generation(prompt: str, model: str = "stabilityai/stable-diffusion-2"):
+    if not HUGGINGFACE_API_KEY:
+        return {"error": "HuggingFace key not found. Add HUGGINGFACE_API_KEY to secrets."}
+    url = f"https://api-inference.huggingface.co/models/{model}"
+    headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+    body = {"inputs": prompt}
+    r = requests.post(url, headers=headers, json=body, timeout=60)
+    if r.status_code != 200:
+        return {"error": f"HF error {r.status_code}", "text": r.text}
+    # Some models return image bytes, others return JSON - handle both
+    ct = r.headers.get("content-type", "")
+    if "application/json" in ct:
         return r.json()
-    except Exception as e:
-        return {"error": str(e)}
+    else:
+        return {"image_bytes": r.content}
 
-# ---------------------------
-# GAMES (embedded HTML/JS)
-# ---------------------------
+# Video generation placeholder: DeepAI / Runway (these require separate onboarding & keys)
+def deepai_video_generate(prompt: str):
+    if not DEEPAI_API_KEY:
+        return {"error": "DEEPAI_API_KEY missing in secrets."}
+    url = "https://api.deepai.org/api/text2video"  # example endpoint
+    headers = {"api-key": DEEPAI_API_KEY}
+    r = requests.post(url, headers=headers, data={"text": prompt}, timeout=60)
+    if r.status_code != 200:
+        return {"error": f"DeepAI error {r.status_code}", "text": r.text}
+    return r.json()
 
-SNAKE_HTML = """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <title>Snake - Technibot</title>
-  <style>
-    body { margin:0; background: linear-gradient(180deg,#001219,#001e2e); display:flex; align-items:center; justify-content:center; height:100vh; }
-    canvas { background:#061826; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.6); }
-  </style>
-</head>
-<body>
-  <canvas id="game" width="480" height="480"></canvas>
-  <script>
-  const canvas = document.getElementById('game');
-  const ctx = canvas.getContext('2d');
-  const grid = 20;
-  let snake = [{x:9, y:9}];
-  let dir = {x:0, y:0};
-  let food = {x:5, y:5};
-  let speed = 8;
-  let last = 0;
-  function loop(time) {
-    if (!last || time - last > 1000 / speed) {
-      update();
-      draw();
-      last = time;
-    }
-    requestAnimationFrame(loop);
-  }
-  function update() {
-    const head = {x: snake[0].x + dir.x, y: snake[0].y + dir.y};
-    if (head.x < 0) head.x = grid-1;
-    if (head.y < 0) head.y = grid-1;
-    if (head.x >= grid) head.x = 0;
-    if (head.y >= grid) head.y = 0;
-    snake.unshift(head);
-    if (head.x === food.x && head.y === food.y) {
-      food = {x: Math.floor(Math.random() * grid), y: Math.floor(Math.random() * grid)};
-      speed = Math.min(22, speed + 0.5);
-    } else {
-      snake.pop();
-    }
-    // collision
-    for (let i=1;i<snake.length;i++) {
-      if (snake[i].x === head.x && snake[i].y === head.y) {
-        snake = [{x:9,y:9}];
-        dir = {x:0,y:0};
-        food = {x:5,y:5};
-        speed = 8;
-      }
-    }
-  }
-  function draw() {
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-    // draw food
-    ctx.fillStyle="#00ffd5";
-    ctx.fillRect(food.x * (canvas.width/grid), food.y * (canvas.width/grid), canvas.width/grid-2, canvas.width/grid-2);
-    // draw snake
-    ctx.fillStyle="#7a00ff";
-    for (let s of snake) {
-      ctx.fillRect(s.x * (canvas.width/grid), s.y * (canvas.width/grid), canvas.width/grid-2, canvas.width/grid-2);
-    }
-  }
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowUp') dir={x:0,y:-1};
-    if (e.key === 'ArrowDown') dir={x:0,y:1};
-    if (e.key === 'ArrowLeft') dir={x:-1,y:0};
-    if (e.key === 'ArrowRight') dir={x:1,y:0};
-  });
-  requestAnimationFrame(loop);
-  </script>
-</body>
-</html>
-"""
+# TTS example: TTSMP3.com (simple) or local espeak fallback
+def tts_via_ttsmp3(text: str, voice: str = "Joey"):
+    if not TTSMP3_API_KEY:
+        # fallback: return a data URL using gTTS-like approach not available offline
+        return {"error": "TTSMP3 API key missing; use espeak on local machine for TTS fallback."}
+    # Example wrapper — the real TTSMP3 REST API will differ; check provider docs
+    url = "https://api.ttsmp3.com/v1/text_to_speech"
+    headers = {"Authorization": f"Bearer {TTSMP3_API_KEY}", "Content-Type": "application/json"}
+    body = {"text": text, "voice": voice}
+    r = requests.post(url, headers=headers, json=body, timeout=30)
+    if r.status_code != 200:
+        return {"error": f"TTSMP3 error {r.status_code}", "text": r.text}
+    return r.json()
 
-PLATFORMER_HTML = """
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Mini Platformer</title>
-<style>
-  body { margin:0; background: linear-gradient(180deg,#020617,#091229); display:flex; align-items:center; justify-content:center; height:100vh; }
-  #canvas { border-radius:12px; box-shadow: 0 12px 36px rgba(0,0,0,0.6); background: linear-gradient(#07102b,#081022); }
-</style>
-</head>
-<body>
-<canvas id="canvas" width="900" height="420"></canvas>
-<script>
-const canvas=document.getElementById('canvas'); const ctx=canvas.getContext('2d');
-let player={x:50,y:300,w:28,h:40,vx:0,vy:0,jumping:false};
-let keys={};
-const gravity=0.8;
-const platforms=[{x:0,y:360,w:900,h:60},{x:200,y:260,w:140,h:16},{x:420,y:200,w:140,h:16},{x:640,y:140,w:160,h:16}];
-function loop(){
-  // physics
-  player.vy+=gravity;
-  player.x+=player.vx; player.y+=player.vy;
-  // collision with bounds
-  if(player.y+player.h>360){ player.y=300; player.vy=0; player.jumping=false;}
-  // platform collision
-  platforms.forEach(p=>{
-    if(player.x+player.w>p.x && player.x<p.x+p.w && player.y+player.h>p.y && player.y+player.h < p.y + 20){
-      player.y=p.y-player.h; player.vy=0; player.jumping=false;
-    }
-  });
-  // friction and input
-  player.vx*=0.9;
-  if(keys['ArrowLeft']) player.vx=-4;
-  if(keys['ArrowRight']) player.vx=4;
-  if(keys['Space'] && !player.jumping){ player.vy=-14; player.jumping=true; }
-  draw();
-  requestAnimationFrame(loop);
-}
-function draw(){
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  // background glow
-  const g=ctx.createLinearGradient(0,0,0,canvas.height); g.addColorStop(0,'#07102b'); g.addColorStop(1,'#081022'); ctx.fillStyle=g; ctx.fillRect(0,0,canvas.width,canvas.height);
-  // platforms
-  ctx.fillStyle='#00ffd5'; platforms.forEach(p=>ctx.fillRect(p.x,p.y,p.w,p.h));
-  // player (neon)
-  ctx.fillStyle='#7a00ff'; ctx.fillRect(player.x,player.y,player.w,player.h);
-}
-window.addEventListener('keydown', (e)=> keys[e.key]=true);
-window.addEventListener('keyup', (e)=> keys[e.key]=false);
-requestAnimationFrame(loop);
-</script>
-</body>
-</html>
-"""
+# -------------------------
+# Game Data: 15 adventurous/action 2D games (browser-friendly embeddings)
+# Each entry contains: title, platforms_to_open (search urls), embed_url (if available)
+# We'll embed via platform search results or direct embedable game page when possible.
+# -------------------------
+GAMES = [
+    {"title": "Super Mario World (fan)", "search": "https://www.kongregate.com/games?search=super%20mario", "platforms": ["kongregate", "newgrounds"]},
+    {"title": "Mega Man 2 (fan)", "search": "https://www.kongregate.com/games?search=mega%20man", "platforms": ["kongregate", "armorgames"]},
+    {"title": "Castlevania-inspired", "search": "https://armorgames.com/search?q=castlevania", "platforms": ["armorgames"]},
+    {"title": "Hollow Knight-style", "search": "https://www.newgrounds.com/search?q=hollow%20knight", "platforms": ["newgrounds"]},
+    {"title": "EarthBound-inspired RPG fan", "search": "https://www.kongregate.com/games?search=earthbound", "platforms": ["kongregate"]},
+    {"title": "Shovel Knight-style", "search": "https://www.miniclip.com/games/search/?q=shovel%20knight", "platforms": ["miniclip"]},
+    {"title": "Chrono Trigger fan-made", "search": "https://www.newgrounds.com/search?q=chrono%20trigger", "platforms": ["newgrounds"]},
+    {"title": "The Messenger-inspired", "search": "https://www.kongregate.com/games?search=the%20messenger", "platforms": ["kongregate"]},
+    {"title": "Undertale-style fan", "search": "https://www.armorgames.com/search?q=undertale", "platforms": ["armorgames"]},
+    {"title": "Retro Action Platformer", "search": "https://www.miniclip.com/games/search/?q=platformer", "platforms": ["miniclip"]},
+    {"title": "Pixel Action Adventure", "search": "https://www.addictinggames.com/search?q=pixel%20platformer", "platforms": ["addictinggames"]},
+    {"title": "Time-Travel RPG fan", "search": "https://www.kongregate.com/games?search=time%20travel%20rpg", "platforms": ["kongregate"]},
+    {"title": "Indie Metroidvania", "search": "https://www.newgrounds.com/search?q=metroidvania", "platforms": ["newgrounds"]},
+    {"title": "Action Roguelike", "search": "https://www.addictinggames.com/search?q=roguelike", "platforms": ["addictinggames"]},
+    {"title": "Ninja Platformer", "search": "https://www.kongregate.com/games?search=ninja%20platformer", "platforms": ["kongregate", "miniclip"]},
+]
 
-# ---------------------------
-# STREAMLIT LAYOUT
-# ---------------------------
-
-def sidebar_ui():
-    st.sidebar.markdown("<div class='card'><div class='neon-title'>Technibot</div>"
-                        "<div class='muted'>Advanced tech assistant • chat • media • games</div></div>",
-                        unsafe_allow_html=True)
+# -------------------------
+# UI Components
+# -------------------------
+def sidebar():
+    st.sidebar.markdown("<div class='card'><div class='neon-title'>Technibot</div><div class='muted'>AI Media, Chat & Games</div></div>", unsafe_allow_html=True)
     st.sidebar.markdown("---", unsafe_allow_html=True)
-    st.sidebar.button("Toggle light/dark", on_click=toggle_theme)
-    st.sidebar.markdown("## Quick tools")
-    if st.sidebar.button("Download manifest.json"):
-        download_json_button(MANIFEST_JSON, filename="manifest.json", label="manifest.json")
-    if st.sidebar.button("Download service-worker.js"):
-        b64 = base64.b64encode(SERVICE_WORKER_JS.encode()).decode()
-        href = f"data:text/javascript;base64,{b64}"
-        st.sidebar.markdown(f"[Download service-worker.js]({href})", unsafe_allow_html=True)
-    if st.sidebar.button("Download tech_knowledge.json"):
-        download_json_button(TECH_KNOWLEDGE, filename="tech_knowledge.json", label="tech_knowledge.json")
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("API Keys (optional):")
-    st.sidebar.text_input("HuggingFace API Key", key="hf_key_input", value=HUGGINGFACE_API_KEY, type="password")
-    st.sidebar.text_input("OpenAI API Key", key="openai_key_input", value=OPENAI_API_KEY, type="password")
-    st.sidebar.text_input("Pexels API Key", key="pexels_key_input", value=PEXELS_API_KEY, type="password")
-    if st.sidebar.button("Apply keys"):
-        # Save temporarily into env (only for this session) so the app can use them
-        if st.session_state.hf_key_input:
-            os.environ["HUGGINGFACE_API_KEY"] = st.session_state.hf_key_input
+    # Theme toggle
+    if st.sidebar.button("Toggle Light/Dark"):
+        st.session_state.theme = "light" if st.session_state.theme == "dark" else "dark"
+        apply_css()
+        st.experimental_rerun()
+    st.sidebar.markdown("### Keys (optional)")
+    st.sidebar.text_input("OpenAI API Key", key="openai_key_input", type="password", placeholder="sk-...")
+    st.sidebar.text_input("HuggingFace API Key", key="hf_key_input", type="password", placeholder="hf_...")
+    st.sidebar.text_input("DeepAI API Key", key="deepai_key_input", type="password", placeholder="deepai-...")
+    st.sidebar.text_input("Runway API Key", key="runway_key_input", type="password", placeholder="runway-...")
+    st.sidebar.text_input("Pexels API Key", key="pexels_key_input", type="password", placeholder="pexels-...")
+    if st.sidebar.button("Apply keys (session only)"):
         if st.session_state.openai_key_input:
             os.environ["OPENAI_API_KEY"] = st.session_state.openai_key_input
+            st.success("OpenAI key added to session env.")
+        if st.session_state.hf_key_input:
+            os.environ["HUGGINGFACE_API_KEY"] = st.session_state.hf_key_input
+            st.success("HuggingFace key added to session env.")
+        if st.session_state.deepai_key_input:
+            os.environ["DEEPAI_API_KEY"] = st.session_state.deepai_key_input
+            st.success("DeepAI key added.")
+        if st.session_state.runway_key_input:
+            os.environ["RUNWAY_API_KEY"] = st.session_state.runway_key_input
+            st.success("Runway key added.")
         if st.session_state.pexels_key_input:
             os.environ["PEXELS_API_KEY"] = st.session_state.pexels_key_input
+            st.success("Pexels key added.")
         st.experimental_rerun()
 
-def main_ui():
-    st.markdown(
-        "<div class='card'><div style='display:flex;justify-content:space-between;align-items:center;'>"
-        "<div><span class='neon-title'>Technibot</span><div class='muted'>Your pro tech support & media studio</div></div>"
-        "<div><small class='muted'>Theme: {}</small></div></div></div>".format(st.session_state.theme),
-        unsafe_allow_html=True
-    )
-    cols = st.columns([2, 1])
-    with cols[0]:
-        chat_panel()
-    with cols[1]:
-        tools_panel()
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Final Query (chat)")
+    st.sidebar.checkbox("Enable finalQuery wrapper (chat)", value=st.session_state.finalQuery_enabled, key="finalQuery_enabled")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Quick Links")
+    st.sidebar.markdown("- [How to get API keys & add to Streamlit secrets](#)")
+    st.sidebar.markdown("- Download tech_knowledge.json below")
+    if st.sidebar.button("Download sample tech_knowledge.json"):
+        sample = {"meta": {"project":"Technibot", "version":"1.0"}, "topics":["Web dev","AI","Games"]}
+        download_json(sample, filename="tech_knowledge.json")
 
+def top_header():
+    st.markdown("<div style='display:flex;justify-content:space-between;align-items:center;'><div><span class='neon-title'>Technibot</span><div class='muted'>AI-powered chat • media • games</div></div><div><small class='muted'>Theme: {}</small></div></div>".format(st.session_state.theme), unsafe_allow_html=True)
+    st.markdown("---", unsafe_allow_html=True)
+
+# -------------------------
+# Chat Panel
+# -------------------------
 def chat_panel():
     st.markdown("<div class='card'><h3>Chat — Tech Help</h3></div>", unsafe_allow_html=True)
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    # Input
-    with st.form("chat_form", clear_on_submit=False):
-        user_input = st.text_area("Ask Technibot (e.g., 'How to fix slow Windows startup?')", height=100, key="user_input")
-        additional_prompt = st.text_input("Optional extra prompt/context (this will be appended)", placeholder="Add more context to the query", key="extra_prompt")
-        submitted = st.form_submit_button("Ask")
-        if submitted:
+    col1, col2 = st.columns([3,1])
+    with col1:
+        user_input = st.text_area("Ask Technibot a tech question (e.g., 'How to speed up Windows boot?')", height=120)
+        extra_prompt = st.text_input("Optional extra context (will be appended to finalQuery)")
+        ai_choice = st.selectbox("Answer source", options=["OpenAI (GPT-3.5)","HuggingFace (Flan-T5)","Knowledge Base (offline heuristic)"])
+        use_final = st.checkbox("Wrap with finalQuery (include tools, videos, steps)", value=st.session_state.finalQuery_enabled)
+        if st.button("Send"):
             if not user_input.strip():
-                st.warning("Please type your question.")
+                st.warning("Please type a question.")
             else:
-                # Build finalQuery per your exact requirement:
-                final_q = build_final_query(user_input.strip(), additional_prompt.strip())
-                # Append user message and show "thinking"
-                st.session_state.messages.append({"role": "user", "text": user_input.strip()})
-                with st.spinner("Generating response..."):
-                    response = run_text_generation(final_q, max_tokens=800)
-                st.session_state.messages.append({"role": "assistant", "text": response})
+                # Build prompt based on toggles
+                prompt_text = user_input.strip()
+                if use_final:
+                    prompt_text = build_final_query(user_input.strip(), extra_prompt.strip() or "N/A")
+                # choose provider
+                if ai_choice.startswith("OpenAI"):
+                    ans = openai_chat(prompt_text)
+                elif ai_choice.startswith("HuggingFace"):
+                    ans = hf_text_generation(prompt_text)
+                else:
+                    ans = heuristic_response(prompt_text)
+                st.session_state.messages.append({"role":"user","text":user_input})
+                st.session_state.messages.append({"role":"assistant","text":ans})
                 st.experimental_rerun()
-
-    # Display conversation
-    for m in st.session_state.messages[::-1]:
-        if m["role"] == "user":
-            st.markdown(f"<div class='card' style='background:linear-gradient(90deg,#00121f,#071a2b);'><b>You:</b><div style='margin-top:6px'>{m['text']}</div></div>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<div class='card' style='background:linear-gradient(90deg,#071018,#08102a);'><b>Technibot:</b><div style='margin-top:6px;white-space:pre-wrap'>{m['text']}</div></div>", unsafe_allow_html=True)
-
-def tools_panel():
-    st.markdown("<div class='card'><h4>Media Studio</h4></div>", unsafe_allow_html=True)
-    tab1, tab2, tab3 = st.tabs(["Image Gen", "Video Search", "Games"])
-    with tab1:
-        image_generation_ui()
-    with tab2:
-        video_search_ui()
-    with tab3:
-        games_ui()
-
-def image_generation_ui():
-    st.markdown("### Image Generation (text to image)")
-    prompt = st.text_input("Image prompt (describe the scene, style, lighting):", value="Futuristic city neon at night, cinematic, ultra-detailed")
-    model = st.selectbox("Model (HuggingFace)", options=["stabilityai/stable-diffusion-2", "stabilityai/stable-diffusion-xl"], index=0)
-    if st.button("Generate Image"):
-        with st.spinner("Generating image..."):
-            res = generate_image_with_hf(prompt, model=model)
-        if "error" in res:
-            st.error(res["error"])
-            if not HUGGINGFACE_API_KEY:
-                st.info("You can get a HuggingFace API key (free tier) at https://huggingface.co/settings/tokens and paste it in the sidebar.")
-        else:
-            # If bytes returned:
-            if "image_bytes" in res:
-                b = res["image_bytes"]
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
-                tmp.write(b)
-                tmp.close()
-                st.image(tmp.name, caption="Generated image (from HF model)", use_column_width=True)
-                with open(tmp.name, "rb") as f:
-                    st.download_button("Download image", f, file_name="technibot_image.png")
+    with col2:
+        st.markdown("<div class='card'><h4>Chat History</h4></div>", unsafe_allow_html=True)
+        for m in st.session_state.messages[::-1][:8]:
+            if m["role"] == "user":
+                st.markdown(f"**You:** {m['text']}")
             else:
-                st.json(res)
+                st.markdown(f"**Technibot:** {m['text'][:400]}{'...' if len(m['text'])>400 else ''}")
 
-def video_search_ui():
-    st.markdown("### Video search (Pexels fallback)")
-    q = st.text_input("Search videos for (e.g., 'coding timelapse')", value="coding timelapse")
-    if st.button("Search Videos"):
-        with st.spinner("Searching videos..."):
-            res = search_videos_pexels(q)
-        if "error" in res:
-            st.error(res["error"])
-            if not PEXELS_API_KEY:
-                st.info("Pexels offers free developer keys at https://www.pexels.com/api/")
-        else:
-            videos = res.get("videos", [])
-            if not videos:
-                st.info("No videos found.")
-            for vid in videos:
-                st.video(vid["video_files"][0]["link"])
-                st.write(f"🎥 {vid.get('user', {}).get('name', 'Unknown')} — {vid.get('duration', 0)}s")
+# -------------------------
+# Image generation panel
+# -------------------------
+def image_panel():
+    st.markdown("<div class='card'><h3>Image Generation</h3></div>", unsafe_allow_html=True)
+    col1, col2 = st.columns([2,1])
+    with col1:
+        prompt = st.text_area("Describe the image you want (style, lighting, composition):", value="Futuristic neon city at night, ultra-detailed, cinematic")
+        model_choice = st.selectbox("Image Model", options=["Stable Diffusion (HuggingFace)","Pixray (external)"])
+        if st.button("Generate Image"):
+            if model_choice.startswith("Stable"):
+                res = hf_image_generation(prompt)
+                if "error" in res:
+                    st.error(res["error"])
+                elif "image_bytes" in res:
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+                    tmp.write(res["image_bytes"])
+                    tmp.close()
+                    st.image(tmp.name, use_column_width=True)
+                    with open(tmp.name,"rb") as f:
+                        st.download_button("Download image", f, file_name="technibot_image.png")
+                else:
+                    st.json(res)
+            else:
+                st.info("Pixray is an external interactive tool; embed or call its API if you have credentials.")
+    with col2:
+        st.markdown("<div class='card'><h4>Image Tips</h4><div class='muted'>Use style tags like 'cinematic', 'ultra-detailed', 'photorealistic', '8k' to improve results.</div></div>", unsafe_allow_html=True)
 
-def games_ui():
-    st.markdown("### Games — press arrow keys / space")
-    st.markdown("**Snake**")
-    components.html(SNAKE_HTML, height=520)
-    st.markdown("**Mini Platformer**")
-    components.html(PLATFORMER_HTML, height=520)
+# -------------------------
+# Video generation panel
+# -------------------------
+def video_panel():
+    st.markdown("<div class='card'><h3>Video Generation</h3></div>", unsafe_allow_html=True)
+    col1, col2 = st.columns([2,1])
+    with col1:
+        v_prompt = st.text_area("Describe the video you'd like (short scene or concept):", value="Coding timelapse, fast cuts, neon overlays, 20 seconds")
+        v_model = st.selectbox("Video generation provider", options=["DeepAI (text2video)","Runway ML (placeholder)","Veed/Kapwing (external editors)"])
+        if st.button("Generate Video"):
+            if v_model.startswith("DeepAI"):
+                res = deepai_video_generate(v_prompt)
+                if "error" in res:
+                    st.error(res["error"])
+                else:
+                    st.json(res)
+            elif v_model.startswith("Runway"):
+                st.info("Runway ML requires their SDK/API & model selection — add RUNWAY_API_KEY in secrets to enable.")
+            else:
+                st.info("Veed/Kapwing are editor platforms; they often require a redirect or embedding their editor UI.")
+    with col2:
+        st.markdown("<div class='card'><h4>Video Voiceover (TTS)</h4></div>", unsafe_allow_html=True)
+        tts_text = st.text_area("Text-to-speech text (for narration)", height=80)
+        tts_provider = st.selectbox("TTS provider", options=["Google TTS (external)","TTSMP3 (API)","espeak NG (local)"])
+        if st.button("Generate TTS"):
+            if tts_provider.startswith("TTSMP3"):
+                res = tts_via_ttsmp3(tts_text)
+                if "error" in res:
+                    st.error(res["error"])
+                else:
+                    st.json(res)
+            else:
+                st.info("Use Google TTS or local espeak for TTS output; add provider keys to use cloud TTS.")
 
-# ---------------------------
-# Automatic finalQuery run at startup (only once)
-# ---------------------------
+# -------------------------
+# Games Panel: embed HTML games or platform search pages
+# -------------------------
+def games_panel():
+    st.markdown("<div class='card'><h3>Games — Adventure & Action (browser)</h3></div>", unsafe_allow_html=True)
+    st.markdown("<div class='game-grid'>", unsafe_allow_html=True)
+    for g in GAMES:
+        title = g["title"]
+        search_url = g["search"]
+        # show quick card with iframe to search results (responsive)
+        with st.container():
+            st.markdown(f"<div class='game-card'><b>{title}</b><div class='muted'>Platform search / playable options</div></div>", unsafe_allow_html=True)
+            # Provide buttons to open search in new tab or embed small preview
+            cols = st.columns([3,1])
+            with cols[0]:
+                # Small embedded iframe preview (if allowed by site)
+                try:
+                    components.iframe(search_url, height=240)
+                except Exception:
+                    st.markdown(f"[Open {title} on platform]({search_url})")
+            with cols[1]:
+                st.write("")
+                st.markdown(f"[Open]({search_url})")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-def auto_run_final_query_at_startup():
-    # We'll execute the finalQuery with a demo prompt automatically if session flag not set.
-    if not st.session_state.get("auto_ran", False):
-        demo_input = "help me troubleshoot a slow laptop startup"
-        demo_extra = "Include tools, videos, sites, apps, and step by step commands for Windows 10"
-        final_q = build_final_query(demo_input, demo_extra)
-        st.session_state.auto_ran = True
-        # Run in background-like manner (but immediately) and show the result in a hidden variable to be shown in UI
-        try:
-            res = run_text_generation(final_q, max_tokens=600)
-        except Exception as e:
-            res = f"[auto-run error] {e}"
-        # Save to session as initial assistant message
-        st.session_state.messages = st.session_state.get("messages", []) + [
-            {"role": "user", "text": demo_input},
-            {"role": "assistant", "text": res}
-        ]
+# -------------------------
+# Settings & API Key guide
+# -------------------------
+API_KEYS_DOC = """
+### How to get API keys & add to Streamlit secrets (toml)
+1. **OpenAI (Chat & GPT-3.5):**
+   - Sign up at https://platform.openai.com/
+   - Create an API key in the Dashboard → API keys.
+   - In Streamlit Cloud: App → Manage App → Secrets, add:
+     ```
+     OPENAI_API_KEY = "sk-..."
+     ```
+2. **Hugging Face (Text & Image models):**
+   - Sign up: https://huggingface.co/
+   - Go to Settings → Access Tokens → New token.
+   - Add to Streamlit secrets:
+     ```
+     HUGGINGFACE_API_KEY = "hf_..."
+     ```
+3. **DeepAI (Video generation):**
+   - https://deepai.org/
+   - Get API key and add:
+     ```
+     DEEPAI_API_KEY = "deepai-..."
+     ```
+4. **Runway / other paid APIs:**
+   - Follow provider docs, place keys in secrets as: RUNWAY_API_KEY = "..."
+5. **TTS providers (e.g., TTSMP3):**
+   - Add TTSMP3_API_KEY = "..."
 
+To add secrets: Go to Streamlit Cloud -> Select app -> Settings -> Secrets -> paste the key lines and Save.
+"""
+
+def settings_panel():
+    st.markdown("<div class='card'><h3>Settings & API Key Guide</h3></div>", unsafe_allow_html=True)
+    st.markdown(API_KEYS_DOC)
+    st.markdown("Example `secrets.toml` for Streamlit (paste into Streamlit secrets):")
+    st.code(textwrap.dedent("""\
+        OPENAI_API_KEY = "sk-..."
+        HUGGINGFACE_API_KEY = "hf_..."
+        DEEPAI_API_KEY = "deepai-..."
+        RUNWAY_API_KEY = "runway-..."
+        PEXELS_API_KEY = "pexels-..."
+        TTSMP3_API_KEY = "ttsmp3-..."
+    """), language="toml")
+
+# -------------------------
+# Main layout
+# -------------------------
+def main():
+    sidebar()
+    top_header()
+
+    tabs = st.tabs(["Chat", "Image", "Video & TTS", "Games", "Settings"])
+    with tabs[0]:
+        chat_panel()
+    with tabs[1]:
+        image_panel()
+    with tabs[2]:
+        video_panel()
+    with tabs[3]:
+        games_panel()
+    with tabs[4]:
+        settings_panel()
+
+    st.markdown("---")
+    st.markdown("<div class='muted'>Technibot — demo scaffold. Add provider API keys in Streamlit secrets to enable full non-redirected AI features.</div>", unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
