@@ -46,16 +46,18 @@ def apply_css():
     muted = "#8da0b3" if theme == "dark" else "#6b7280"
     css = f"""
     <style>
-    .stApp {{ background: radial-gradient(circle at 10% 10%, rgba(122,0,255,0.04), transparent 8%), radial-gradient(circle at 90% 90%, rgba(0,255,213,0.03), transparent 8%), {bg}; color: {text}; }}
-    .card {{ background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent); padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.03); }}
-    .neon-title {{ font-weight:700; font-size:28px; background: -webkit-linear-gradient(#fff, #8ef9e3); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-shadow: 0 0 12px rgba(0,255,213,0.06); }}
+    .stApp {{ background: radial-gradient(circle at 10% 10%, rgba(122,0,255,0.06), transparent 8%), radial-gradient(circle at 90% 90%, rgba(0,255,213,0.03), transparent 8%), {bg}; color: {text}; }}
+    .card {{ background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent); padding: 16px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.03); }}
+    .neon-title {{ font-weight:700; font-size:28px; background: -webkit-linear-gradient(#fff, #8ef9e3); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-shadow: 0 0 18px rgba(0,255,213,0.08); }}
     .muted {{ color: {muted}; font-size:13px; }}
-    .game-grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap: 12px; }}
+    .small-btn {{ background: linear-gradient(90deg,#00ffd5,#7a00ff); border-radius:8px; padding:8px 12px; color:#001; font-weight:700; }}
+    .game-grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(240px,1fr)); gap: 12px; }}
     .game-card {{ padding:8px; border-radius:10px; background: rgba(255,255,255,0.01); border:1px solid rgba(255,255,255,0.02); }}
-    @media(max-width:600px){ .neon-title { font-size:20px; } }
+    @media(max-width:600px){{ .neon-title {{ font-size:20px; }} }}
     </style>
     """
     st.markdown(css, unsafe_allow_html=True)
+
 
 apply_css()
 
@@ -478,3 +480,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
